@@ -247,6 +247,7 @@ export default function DashboardPage() {
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
+    console.log("Fichier sélectionné:", file);
     if (file) {
       const validExtensions = [".csv", ".xlsx", ".xls"];
       const fileExtension = file.name
@@ -697,7 +698,7 @@ export default function DashboardPage() {
                 </button>
               </div>
 
-              {/* 4️⃣ Import */}
+              {/* 4️⃣ Import - SECTION CORRIGÉE */}
               <div className="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
                 <div className="flex justify-between items-start mb-4">
                   <div>
@@ -711,13 +712,40 @@ export default function DashboardPage() {
                   </div>
                 </div>
 
+                {/* CORRECTION ICI : Ajouter l'input file caché */}
+                <input
+                  ref={fileInputRef}
+                  id="file-upload"
+                  type="file"
+                  accept=".csv,.xlsx,.xls"
+                  onChange={handleFileSelect}
+                  className="hidden"
+                />
+
                 <label
                   htmlFor="file-upload"
                   className="block p-4 text-center border-2 border-dashed rounded-xl bg-gray-50 hover:bg-gray-100 cursor-pointer mb-3"
                 >
-                  <p className="text-sm text-gray-600">
-                    {selectedFile ? selectedFile.name : "Choisir un fichier"}
-                  </p>
+                  {selectedFile ? (
+                    <>
+                      <p className="text-sm font-medium text-gray-900">
+                        {selectedFile.name}
+                      </p>
+                      <p className="text-xs text-gray-500 mt-1">
+                        Cliquez pour changer de fichier
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <Upload className="w-8 h-8 mx-auto text-gray-400" />
+                      <p className="text-sm text-gray-600 mt-2">
+                        Cliquez pour choisir un fichier
+                      </p>
+                      <p className="text-xs text-gray-400 mt-1">
+                        CSV, Excel (.csv, .xlsx, .xls)
+                      </p>
+                    </>
+                  )}
                 </label>
 
                 {importProgress > 0 && (

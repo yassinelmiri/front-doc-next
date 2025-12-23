@@ -53,7 +53,7 @@ export default function DashboardAdminPage() {
     setIsLoadingStats(true)
     try {
       const token = localStorage.getItem('token')
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000'}/api/patients/stats`, {
+      const response = await fetch(`${'https://backend-docnotif.vercel.app'}/api/patients/stats`, {
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
@@ -74,7 +74,7 @@ export default function DashboardAdminPage() {
   const fetchDoctors = async () => {
     try {
       const token = localStorage.getItem('token')
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000'}/api/doctors/profile`, {
+      const response = await fetch(`${'https://backend-docnotif.vercel.app'}/api/doctors/profile`, {
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
@@ -93,7 +93,7 @@ export default function DashboardAdminPage() {
   const toggleDoctorStatus = async (doctorId: string, currentStatus: boolean) => {
     try {
       const token = localStorage.getItem('token')
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000'}/api/doctors/${doctorId}`, {
+      const response = await fetch(`${'https://backend-docnotif.vercel.app'}/api/doctors/${doctorId}`, {
         method: 'PUT',
         headers: {
           'Authorization': `Bearer ${token}`,
