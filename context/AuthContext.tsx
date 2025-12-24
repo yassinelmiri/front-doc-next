@@ -7,6 +7,7 @@ import {
   useEffect,
   ReactNode,
   useCallback,
+  useRef,
 } from "react";
 import { useRouter, usePathname } from "next/navigation";
 
@@ -81,6 +82,7 @@ interface AuthContextType {
   useTestAccount: (role: 'doctor' | 'admin') => void;
   isTestMode: boolean;
   refreshPatients: () => Promise<void>;
+  checkAndUpdateOverdueAppointments: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -124,40 +126,80 @@ const TEST_ACCOUNTS = {
 };
 
 // Données mockées pour les patients de test
-const MOCK_PATIENTS: Patient[] = [
-  {
-    _id: 'patient-1',
-    nomComplet: 'Marie Martin',
-    telephone: '+33123456789',
-    heureRendezVous: new Date(Date.now() + 36000000).toISOString(),
-    heureEstimee: new Date(Date.now() + 54000000).toISOString(),
-    termine: false,
-    doctorId: 'test-doctor-id-123',
-    doctorName: 'Dr. Jean Dupont',
-    importFileName: 'patients-test.xlsx',
-    importDate: new Date().toISOString(),
-    statut: 'en_attente',
-    smsEnvoye: false,
-    notes: 'Première consultation - Suivi régulier'
-  },
-  {
-    _id: 'patient-2',
-    nomComplet: 'Pierre Bernard',
-    telephone: '+33198765432',
-    heureRendezVous: new Date(Date.now() + 7200000).toISOString(),
-    heureEstimee: new Date(Date.now() + 8100000).toISOString(),
-    termine: false,
-    doctorId: 'test-doctor-id-123',
-    doctorName: 'Dr. Jean Dupont',
-    importFileName: 'patients-test.xlsx',
-    importDate: new Date().toISOString(),
-    statut: 'en_cours',
-    smsEnvoye: true,
-    dateSMS: new Date(Date.now() - 1800000).toISOString(),
-    messageSMS: 'Bonjour, votre rendez-vous est dans 30 minutes.',
-    notes: 'Patient régulier - À surveiller'
-  }
-];
+const createMockPatients = (): Patient[] => {
+  const now = new Date();
+  const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+  const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+  const inOneHour = new Date(now.getTime() + 60 * 60 * 1000);
+  const inTwoHours = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+
+  return [
+    {
+      _id: 'patient-1',
+      nomComplet: 'Marie Martin',
+      telephone: '+33123456789',
+      heureRendezVous: inTwoHours.toISOString(),
+      heureEstimee: inTwoHours.toISOString(),
+      termine: false,
+      doctorId: 'test-doctor-id-123',
+      doctorName: 'Dr. Jean Dupont',
+      importFileName: 'patients-test.xlsx',
+      importDate: new Date().toISOString(),
+      statut: 'en_attente',
+      smsEnvoye: false,
+      notes: 'Première consultation - Suivi régulier'
+    },
+    {
+      _id: 'patient-2',
+      nomComplet: 'Pierre Bernard',
+      telephone: '+33198765432',
+      heureRendezVous: inOneHour.toISOString(),
+      heureEstimee: inOneHour.toISOString(),
+      termine: false,
+      doctorId: 'test-doctor-id-123',
+      doctorName: 'Dr. Jean Dupont',
+      importFileName: 'patients-test.xlsx',
+      importDate: new Date().toISOString(),
+      statut: 'en_cours',
+      smsEnvoye: true,
+      dateSMS: new Date(Date.now() - 1800000).toISOString(),
+      messageSMS: 'Bonjour, votre rendez-vous est dans 30 minutes.',
+      notes: 'Patient régulier - À surveiller'
+    },
+    {
+      _id: 'patient-3',
+      nomComplet: 'Sophie Dubois',
+      telephone: '+33155556666',
+      heureRendezVous: twoHoursAgo.toISOString(),
+      heureEstimee: twoHoursAgo.toISOString(),
+      termine: false,
+      doctorId: 'test-doctor-id-123',
+      doctorName: 'Dr. Jean Dupont',
+      importFileName: 'patients-test.xlsx',
+      importDate: new Date().toISOString(),
+      statut: 'en_attente',
+      smsEnvoye: false,
+      notes: 'Consultation initiale'
+    },
+    {
+      _id: 'patient-4',
+      nomComplet: 'Thomas Leroy',
+      telephone: '+33177778888',
+      heureRendezVous: oneHourAgo.toISOString(),
+      heureEstimee: oneHourAgo.toISOString(),
+      termine: false,
+      doctorId: 'test-doctor-id-123',
+      doctorName: 'Dr. Jean Dupont',
+      importFileName: 'patients-test.xlsx',
+      importDate: new Date().toISOString(),
+      statut: 'en_cours',
+      smsEnvoye: true,
+      dateSMS: oneHourAgo.toISOString(),
+      messageSMS: 'Bonjour, votre rendez-vous est maintenant.',
+      notes: 'Suivi mensuel'
+    }
+  ];
+};
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [doctor, setDoctor] = useState<Doctor | null>(null);
@@ -168,122 +210,250 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isTestMode, setIsTestMode] = useState(false);
   const router = useRouter();
   const pathname = usePathname();
+  
+  // Refs pour éviter les boucles infinies
+  const fetchPatientsInProgressRef = useRef(false);
+  const hasLoadedPatientsRef = useRef(false);
+  const lastDoctorIdRef = useRef<string | null>(null);
 
-  // Charger les patients depuis localStorage
-  const loadPatientsFromStorage = useCallback(() => {
+  // ============= FONCTIONS UTILITAIRES (PAS DE DÉPENDANCES) =============
+  
+  const loadPatientsFromStorage = (): Patient[] => {
     try {
       const storedPatients = localStorage.getItem("patients");
       if (storedPatients) {
-        const parsedPatients = JSON.parse(storedPatients);
-        console.log("📂 Patients chargés depuis localStorage:", parsedPatients.length);
-        return parsedPatients;
+        return JSON.parse(storedPatients);
       }
     } catch (error) {
       console.error("Erreur chargement patients localStorage:", error);
     }
     return [];
-  }, []);
+  };
 
-  // Sauvegarder les patients dans localStorage
-  const savePatientsToStorage = useCallback((patientsData: Patient[]) => {
+  const savePatientsToStorage = (patientsData: Patient[]) => {
     try {
       localStorage.setItem("patients", JSON.stringify(patientsData));
-      console.log("💾 Patients sauvegardés dans localStorage:", patientsData.length);
     } catch (error) {
       console.error("Erreur sauvegarde patients localStorage:", error);
     }
-  }, []);
+  };
 
-  // Fonction pour utiliser un compte de test
+  // ============= LOGOUT (FONCTION STABLE) =============
+  
+  const logout = useCallback(() => {
+    localStorage.removeItem("token");
+    localStorage.removeItem("doctor");
+    localStorage.removeItem("patients");
+    localStorage.removeItem("isTestMode");
+    setDoctor(null);
+    setPatients([]);
+    setIsTestMode(false);
+    setIsInitialized(false);
+    fetchPatientsInProgressRef.current = false;
+    hasLoadedPatientsRef.current = false;
+    lastDoctorIdRef.current = null;
+    router.push("/login");
+  }, [router]);
+
+  // ============= FETCH PATIENTS (AVEC PROTECTION CONTRE BOUCLES) =============
+  
+  const fetchPatients = useCallback(async () => {
+    // Protection contre les appels multiples simultanés
+    if (fetchPatientsInProgressRef.current) {
+      console.log("⏸️ fetchPatients déjà en cours, annulation");
+      return;
+    }
+
+    if (!doctor || doctor.isAdmin) {
+      console.log("❌ fetchPatients annulé: pas de docteur ou admin");
+      return;
+    }
+
+    console.log("🚀 Début de fetchPatients");
+    fetchPatientsInProgressRef.current = true;
+    setLoading(true);
+
+    try {
+      const token = localStorage.getItem("token");
+      const testMode = localStorage.getItem("isTestMode");
+
+      // Mode test
+      if (testMode === "true") {
+        console.log("📊 Mode test: Chargement patients mockés");
+        const storedPatients = loadPatientsFromStorage();
+        if (storedPatients.length > 0) {
+          setPatients(storedPatients);
+        } else {
+          const mockPatients = createMockPatients();
+          setPatients(mockPatients);
+          savePatientsToStorage(mockPatients);
+        }
+        hasLoadedPatientsRef.current = true;
+        return;
+      }
+
+      // Mode normal - vérifier le token
+      if (!token) {
+        console.log("❌ Pas de token, chargement depuis localStorage");
+        const storedPatients = loadPatientsFromStorage();
+        setPatients(storedPatients);
+        hasLoadedPatientsRef.current = true;
+        return;
+      }
+
+      console.log("📡 Appel API pour récupérer les patients...");
+      const response = await fetch(`${API_URL}/api/patients`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (response.status === 401) {
+        console.log("🔒 Token invalide, déconnexion");
+        logout();
+        return;
+      }
+
+      if (response.status === 404 || response.status === 204) {
+        console.log("ℹ️ Aucun patient trouvé sur le serveur");
+        const storedPatients = loadPatientsFromStorage();
+        setPatients(storedPatients);
+        hasLoadedPatientsRef.current = true;
+        return;
+      }
+
+      if (!response.ok) {
+        console.error("❌ Erreur API patients:", response.status);
+        const storedPatients = loadPatientsFromStorage();
+        setPatients(storedPatients);
+        hasLoadedPatientsRef.current = true;
+        return;
+      }
+
+      const data = await response.json();
+      console.log("✅ Patients reçus du serveur");
+      
+      let patientsData: Patient[] = [];
+      
+      if (data.success && Array.isArray(data.data)) {
+        patientsData = data.data;
+      } else if (Array.isArray(data)) {
+        patientsData = data;
+      } else if (data.data && Array.isArray(data.data)) {
+        patientsData = data.data;
+      } else if (data.patients && Array.isArray(data.patients)) {
+        patientsData = data.patients;
+      }
+
+      console.log(`📊 ${patientsData.length} patients chargés`);
+      
+      setPatients(patientsData);
+      savePatientsToStorage(patientsData);
+      hasLoadedPatientsRef.current = true;
+      
+    } catch (error: any) {
+      console.error("❌ Erreur fetch patients:", error.message);
+      const storedPatients = loadPatientsFromStorage();
+      setPatients(storedPatients);
+      hasLoadedPatientsRef.current = true;
+    } finally {
+      console.log("✅ fetchPatients terminé");
+      setLoading(false);
+      fetchPatientsInProgressRef.current = false;
+    }
+  }, [doctor, logout]);
+
+  // ============= REFRESH PATIENTS =============
+  
+  const refreshPatients = useCallback(async () => {
+    console.log("🔄 Rafraîchissement manuel des patients");
+    hasLoadedPatientsRef.current = false;
+    await fetchPatients();
+  }, [fetchPatients]);
+
+  // ============= CHECK OVERDUE APPOINTMENTS =============
+  
+  const checkAndUpdateOverdueAppointments = useCallback(() => {
+    if (!patients.length) return;
+
+    const now = new Date();
+    let hasUpdates = false;
+    
+    const updatedPatients = patients.map(patient => {
+      const rdvTime = new Date(patient.heureRendezVous);
+      
+      if (rdvTime < now && patient.statut !== 'termine') {
+        hasUpdates = true;
+        return {
+          ...patient,
+          statut: 'termine' as const,
+          termine: true
+        };
+      }
+      return patient;
+    });
+
+    if (hasUpdates) {
+      setPatients(updatedPatients);
+      savePatientsToStorage(updatedPatients);
+    }
+  }, [patients]);
+
+  // ============= USE TEST ACCOUNT =============
+  
   const useTestAccount = useCallback((role: 'doctor' | 'admin') => {
+    console.log("🔄 Activation du mode test pour:", role);
+    
     const testAccount = TEST_ACCOUNTS[role];
     localStorage.setItem("token", testAccount.token);
     localStorage.setItem("doctor", JSON.stringify(testAccount.doctor));
     localStorage.setItem("isTestMode", "true");
+    
     setDoctor(testAccount.doctor);
     setIsTestMode(true);
     
     if (role === 'doctor') {
-      console.log("📊 Mode test: Chargement des patients mockés");
-      setPatients(MOCK_PATIENTS);
-      savePatientsToStorage(MOCK_PATIENTS);
+      console.log("📊 Création des patients de test");
+      const mockPatients = createMockPatients();
+      setPatients(mockPatients);
+      savePatientsToStorage(mockPatients);
     } else {
-      console.log("📊 Mode test admin: Pas de patients");
+      console.log("📊 Mode admin: pas de patients");
       setPatients([]);
       localStorage.removeItem("patients");
     }
     
     setIsInitialized(true);
+    hasLoadedPatientsRef.current = true;
+    lastDoctorIdRef.current = testAccount.doctor._id;
     
     if (role === 'admin') {
       router.push("/dashboardAdmin");
     } else {
       router.push("/dashboard");
     }
-  }, [router, savePatientsToStorage]);
+  }, [router]);
 
-  // Vérifier l'authentification au chargement
-  useEffect(() => {
-    const checkAuth = async () => {
-      if (isInitialized) return;
-
-      try {
-        const token = localStorage.getItem("token");
-        const doctorData = localStorage.getItem("doctor");
-        const testMode = localStorage.getItem("isTestMode");
-
-        if (token && doctorData) {
-          const parsedDoctor = JSON.parse(doctorData);
-          setDoctor(parsedDoctor);
-          setIsTestMode(testMode === "true");
-          
-          // Charger les patients depuis localStorage
-          const storedPatients = loadPatientsFromStorage();
-          if (storedPatients.length > 0) {
-            console.log("📂 Utilisation des patients stockés:", storedPatients.length);
-            setPatients(storedPatients);
-          } else if (testMode === "true" && parsedDoctor && !parsedDoctor.isAdmin) {
-            console.log("📊 Mode test: Chargement patients mockés");
-            setPatients(MOCK_PATIENTS);
-          }
-        }
-      } catch (error) {
-        console.error("Erreur vérification auth:", error);
-        localStorage.removeItem("token");
-        localStorage.removeItem("doctor");
-        localStorage.removeItem("patients");
-        localStorage.removeItem("isTestMode");
-        setDoctor(null);
-        setPatients([]);
-        setIsTestMode(false);
-      } finally {
-        setIsInitialized(true);
-      }
-    };
-
-    checkAuth();
-  }, [isInitialized, loadPatientsFromStorage]);
-
-  // Login
+  // ============= LOGIN =============
+  
   const login = async (email: string, password: string) => {
     setLoading(true);
     setError("");
 
     try {
-      // Vérifier si c'est un compte de test
+      // Vérifier les comptes de test
       if (email === TEST_ACCOUNTS.doctor.email && password === TEST_ACCOUNTS.doctor.password) {
-        console.log("🔧 Mode test activé: Compte Docteur");
         useTestAccount('doctor');
         return;
       }
 
       if (email === TEST_ACCOUNTS.admin.email && password === TEST_ACCOUNTS.admin.password) {
-        console.log("🔧 Mode test activé: Compte Admin");
         useTestAccount('admin');
         return;
       }
 
-      // API normale
+      // Appel API réel
       const response = await fetch(`${API_URL}/api/doctors/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -294,9 +464,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const errorText = await response.text();
         try {
           const errorData = JSON.parse(errorText);
-          throw new Error(errorData.message || `Erreur ${response.status}: ${response.statusText}`);
+          throw new Error(errorData.message || `Erreur ${response.status}`);
         } catch {
-          throw new Error(`Erreur ${response.status}: ${response.statusText}`);
+          throw new Error(`Erreur ${response.status}`);
         }
       }
 
@@ -318,12 +488,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       localStorage.setItem("token", token);
       localStorage.setItem("doctor", JSON.stringify(doctorData));
       localStorage.removeItem("isTestMode");
+      localStorage.removeItem("patients");
       
       setDoctor(doctorData);
       setIsTestMode(false);
       setIsInitialized(true);
+      hasLoadedPatientsRef.current = false;
+      lastDoctorIdRef.current = doctorData._id;
 
-      // Rediriger
       if (!doctorData.isActive) {
         router.push("/compte-en-attente");
       } else if (doctorData.isAdmin) {
@@ -340,7 +512,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Register
+  // ============= REGISTER =============
+  
   const register = async (
     nomComplet: string,
     email: string,
@@ -366,9 +539,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const errorText = await response.text();
         try {
           const errorData = JSON.parse(errorText);
-          throw new Error(errorData.message || `Erreur ${response.status}: ${response.statusText}`);
+          throw new Error(errorData.message || `Erreur ${response.status}`);
         } catch {
-          throw new Error(`Erreur ${response.status}: ${response.statusText}`);
+          throw new Error(`Erreur ${response.status}`);
         }
       }
 
@@ -381,10 +554,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       localStorage.setItem("token", data.token);
       localStorage.setItem("doctor", JSON.stringify(data.doctor));
       localStorage.removeItem("isTestMode");
+      localStorage.removeItem("patients");
       
       setDoctor(data.doctor);
       setIsTestMode(false);
       setIsInitialized(true);
+      hasLoadedPatientsRef.current = false;
+      lastDoctorIdRef.current = data.doctor._id;
 
       router.push("/compte-en-attente");
     } catch (error: any) {
@@ -396,131 +572,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Logout
-  const logout = () => {
-    localStorage.removeItem("token");
-    localStorage.removeItem("doctor");
-    localStorage.removeItem("patients");
-    localStorage.removeItem("isTestMode");
-    setDoctor(null);
-    setPatients([]);
-    setIsTestMode(false);
-    setIsInitialized(false);
-    router.push("/login");
-  };
-
-  // Fetch patients
-  const fetchPatients = useCallback(async () => {
-    if (!isInitialized || !doctor || doctor.isAdmin) {
-      console.log("Fetch patients skipped: not initialized or no doctor or admin");
-      return;
-    }
-
-    setLoading(true);
-
-    try {
-      const token = localStorage.getItem("token");
-      const testMode = localStorage.getItem("isTestMode");
-
-      // Mode test: utiliser les données du localStorage
-      if (testMode === "true") {
-        console.log("📊 Mode test: Chargement patients depuis localStorage");
-        const storedPatients = loadPatientsFromStorage();
-        if (storedPatients.length > 0) {
-          setPatients(storedPatients);
-        } else {
-          setPatients(MOCK_PATIENTS);
-          savePatientsToStorage(MOCK_PATIENTS);
-        }
-        return;
-      }
-
-      if (!token) {
-        console.log("❌ Pas de token, chargement depuis localStorage");
-        const storedPatients = loadPatientsFromStorage();
-        setPatients(storedPatients);
-        return;
-      }
-
-      // Appel API pour récupérer les patients
-      console.log("📡 Récupération des patients depuis l'API...");
-      const response = await fetch(`${API_URL}/api/patients`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      });
-
-      if (response.status === 401) {
-        console.log("❌ Token invalide, déconnexion");
-        logout();
-        return;
-      }
-
-      if (response.status === 404 || response.status === 204) {
-        console.log("ℹ️ Aucun patient trouvé sur le serveur");
-        const storedPatients = loadPatientsFromStorage();
-        setPatients(storedPatients);
-        return;
-      }
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error("❌ Erreur API patients:", errorText);
-        const storedPatients = loadPatientsFromStorage();
-        setPatients(storedPatients);
-        return;
-      }
-
-      const data = await response.json();
-      console.log("✅ Patients reçus du serveur:", data);
-
-      let patientsData: Patient[] = [];
-      
-      if (data.success && Array.isArray(data.data)) {
-        patientsData = data.data;
-      } else if (Array.isArray(data)) {
-        patientsData = data;
-      } else if (data.data && Array.isArray(data.data)) {
-        patientsData = data.data;
-      } else if (data.patients && Array.isArray(data.patients)) {
-        patientsData = data.patients;
-      }
-
-      console.log(`📊 ${patientsData.length} patients chargés`);
-      
-      // Mettre à jour l'état et le localStorage
-      setPatients(patientsData);
-      savePatientsToStorage(patientsData);
-      
-    } catch (error: any) {
-      console.error("❌ Erreur fetch patients:", error);
-      const storedPatients = loadPatientsFromStorage();
-      setPatients(storedPatients);
-    } finally {
-      setLoading(false);
-    }
-  }, [isInitialized, doctor, logout, loadPatientsFromStorage, savePatientsToStorage]);
-
-  // Fonction de rafraîchissement
-  const refreshPatients = useCallback(async () => {
-    console.log("🔄 Rafraîchissement manuel des patients");
-    await fetchPatients();
-  }, [fetchPatients]);
-
-  // Charger les patients automatiquement
-  useEffect(() => {
-    if (isInitialized && doctor && doctor.isActive && !doctor.isAdmin) {
-      console.log("🚀 Chargement initial des patients");
-      fetchPatients();
-    }
-  }, [isInitialized, doctor, fetchPatients]);
-
-  // Import patients - CORRIGÉ POUR MODE TEST
+  // ============= IMPORT PATIENTS =============
+  
   const importPatients = async (
     file: File
   ): Promise<{ success: boolean; message: string; data?: Patient[] }> => {
-    if (!isInitialized || !doctor) {
+    if (!doctor) {
       return {
         success: false,
         message: "Veuillez vous connecter d'abord",
@@ -529,32 +586,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const testMode = localStorage.getItem("isTestMode");
     
-    // EN MODE TEST - CORRECTION CRITIQUE
+    // Mode test
     if (testMode === "true") {
       console.log("📁 Mode test: Simulation d'import de fichier", file.name);
       
-      // Simuler un délai d'import
       await new Promise(resolve => setTimeout(resolve, 1500));
       
-      // Générer 3 nouveaux patients simulés
       const newPatients: Patient[] = [];
       for (let i = 1; i <= 3; i++) {
         const timestamp = Date.now();
         const randomId = Math.random().toString(36).substring(2, 15);
         const newId = `imported-${timestamp}-${randomId}-${i}`;
         
+        const rdvDate = new Date(timestamp + 86400000 * i);
+        const now = new Date();
+        const statut = rdvDate < now ? 'termine' : 'en_attente';
+        
         const newPatient: Patient = {
           _id: newId,
           nomComplet: `Patient Importé ${i}`,
           telephone: `+331${Math.floor(Math.random() * 1000000000).toString().padStart(9, '0')}`,
-          heureRendezVous: new Date(timestamp + 86400000 * i).toISOString(),
+          heureRendezVous: rdvDate.toISOString(),
           heureEstimee: new Date(timestamp + 86400000 * i + 1800000).toISOString(),
-          termine: false,
+          termine: rdvDate < now,
           doctorId: doctor._id,
           doctorName: doctor.nomComplet,
           importFileName: file.name,
           importDate: new Date().toISOString(),
-          statut: 'en_attente' as const,
+          statut: statut as any,
           smsEnvoye: false,
           notes: `Importé depuis ${file.name}`
         };
@@ -562,22 +621,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         newPatients.push(newPatient);
       }
       
-      console.log("✅ Patients générés en mode test:", newPatients);
-      
-      // CORRECTION: Ajouter les nouveaux patients à la liste existante
-      const currentPatients = patients; // Utiliser l'état actuel
-      const updatedPatients = [...currentPatients, ...newPatients];
-      
-      console.log("📊 Avant import:", currentPatients.length, "patients");
-      console.log("📊 Après import:", updatedPatients.length, "patients");
-      
-      // Mettre à jour l'état IMMÉDIATEMENT
+      const updatedPatients = [...patients, ...newPatients];
       setPatients(updatedPatients);
-      
-      // Sauvegarder dans localStorage
       savePatientsToStorage(updatedPatients);
-      
-      console.log("💾 Patients sauvegardés dans localStorage:", updatedPatients.length);
       
       return {
         success: true,
@@ -586,14 +632,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       };
     }
 
-    // MODE RÉEL (API)
+    // Mode réel
     setLoading(true);
     try {
       const token = localStorage.getItem("token");
       const formData = new FormData();
       formData.append("file", file);
 
-      console.log("📤 Envoi du fichier à l'API...");
       const response = await fetch(`${API_URL}/api/patients/import`, {
         method: "POST",
         headers: {
@@ -604,14 +649,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (!response.ok) {
         const errorData = await response.json();
-        console.error("❌ Erreur import API:", errorData);
         throw new Error(errorData.message || "Erreur lors de l'import");
       }
 
       const data = await response.json();
-      console.log("✅ Import réussi:", data);
-
-      // Rafraîchir les patients depuis l'API
+      
+      // Recharger les patients après import
+      hasLoadedPatientsRef.current = false;
       await fetchPatients();
 
       return {
@@ -620,7 +664,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         data: data.data,
       };
     } catch (error: any) {
-      console.error("❌ Import error:", error);
+      console.error("Import error:", error);
       return {
         success: false,
         message: error.message || "Erreur lors de l'import",
@@ -630,16 +674,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Export patients
+  // ============= EXPORT PATIENTS =============
+  
   const exportPatients = async (format: "csv" | "excel") => {
-    if (!isInitialized || !doctor) {
+    if (!doctor) {
       throw new Error("Veuillez vous connecter d'abord");
     }
 
     const testMode = localStorage.getItem("isTestMode");
     if (testMode === "true") {
-      console.log("📤 Mode test: Simulation d'export", format);
-      
       const content = "Nom,Téléphone,Heure RDV,Statut\n" +
         patients.map(p => 
           `${p.nomComplet},${p.telephone},${new Date(p.heureRendezVous).toLocaleString()},${p.statut}`
@@ -687,13 +730,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Send bulk delay SMS
+  // ============= SEND BULK SMS =============
+  
   const sendBulkDelaySMS = async (): Promise<{
     success: boolean;
     message: string;
     data?: any;
   }> => {
-    if (!isInitialized || !doctor) {
+    if (!doctor) {
       return {
         success: false,
         message: "Veuillez vous connecter d'abord",
@@ -702,8 +746,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const testMode = localStorage.getItem("isTestMode");
     if (testMode === "true") {
-      console.log("📱 Mode test: Simulation d'envoi de SMS en masse");
-      
       const waitingPatients = patients.filter(p => p.statut === "en_attente");
       
       if (waitingPatients.length === 0) {
@@ -753,6 +795,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       const data = await response.json();
 
+      // Recharger les patients après envoi SMS
+      hasLoadedPatientsRef.current = false;
       await fetchPatients();
 
       return {
@@ -771,12 +815,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Send SMS to single patient
+  // ============= SEND SINGLE SMS (SUITE) =============
+  
   const sendSMS = async (
     patientId: string,
     message?: string
   ): Promise<{ success: boolean; message: string }> => {
-    if (!isInitialized || !doctor) {
+    if (!doctor) {
       return {
         success: false,
         message: "Veuillez vous connecter d'abord",
@@ -785,8 +830,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const testMode = localStorage.getItem("isTestMode");
     if (testMode === "true") {
-      console.log("📱 Mode test: Simulation d'envoi de SMS à un patient");
-      
       const patient = patients.find(p => p._id === patientId);
       if (!patient) {
         return {
@@ -834,6 +877,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       const data = await response.json();
 
+      // Recharger les patients
+      hasLoadedPatientsRef.current = false;
       await fetchPatients();
 
       return {
@@ -849,12 +894,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Update patient
+  // ============= UPDATE PATIENT =============
+  
   const updatePatient = async (
     patientId: string,
     data: Partial<Patient>
   ): Promise<{ success: boolean; message: string }> => {
-    if (!isInitialized || !doctor) {
+    if (!doctor) {
       return {
         success: false,
         message: "Veuillez vous connecter d'abord",
@@ -863,7 +909,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const testMode = localStorage.getItem("isTestMode");
     
-    // Mettre à jour localement
     const updatedPatients = patients.map(patient => {
       if (patient._id === patientId) {
         return { ...patient, ...data };
@@ -875,7 +920,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     savePatientsToStorage(updatedPatients);
 
     if (testMode === "true") {
-      console.log("🔄 Mode test: Mise à jour patient", patientId, data);
       return {
         success: true,
         message: "Patient mis à jour avec succès (mode test)"
@@ -900,6 +944,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       const responseData = await response.json();
       
+      // Recharger les patients
+      hasLoadedPatientsRef.current = false;
       await fetchPatients();
 
       return {
@@ -915,11 +961,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Delete patient
+  // ============= DELETE PATIENT =============
+  
   const deletePatient = async (
     patientId: string
   ): Promise<{ success: boolean; message: string }> => {
-    if (!isInitialized || !doctor) {
+    if (!doctor) {
       return {
         success: false,
         message: "Veuillez vous connecter d'abord",
@@ -928,13 +975,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const testMode = localStorage.getItem("isTestMode");
     
-    // Supprimer localement
     const updatedPatients = patients.filter(patient => patient._id !== patientId);
     setPatients(updatedPatients);
     savePatientsToStorage(updatedPatients);
 
     if (testMode === "true") {
-      console.log("🗑️ Mode test: Suppression patient", patientId);
       return {
         success: true,
         message: "Patient supprimé avec succès (mode test)"
@@ -952,19 +997,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (!response.ok) {
         const errorData = await response.json();
-        console.error("❌ Erreur suppression API:", errorData);
+        console.error("Erreur suppression API:", errorData);
         throw new Error(errorData.message || "Erreur lors de la suppression");
       }
 
       const data = await response.json();
-      console.log("✅ Suppression API réussie:", data);
       
       return {
         success: true,
         message: data.message || "Patient supprimé avec succès",
       };
     } catch (error: any) {
-      console.error("❌ Delete patient error:", error);
+      console.error("Delete patient error:", error);
       return {
         success: false,
         message: "Patient supprimé localement (erreur serveur: " + error.message + ")"
@@ -972,7 +1016,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Fonction pour vérifier le statut et rediriger
+  // ============= CHECK USER STATUS =============
+  
   const checkUserStatusAndRedirect = useCallback(() => {
     if (!doctor || !isInitialized) return;
 
@@ -993,12 +1038,100 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [doctor, isInitialized, router, pathname]);
 
+  // ============= EFFECT: CHECK AUTH ON MOUNT =============
+  
+  useEffect(() => {
+    if (isInitialized) return;
+
+    const checkAuth = () => {
+      try {
+        const token = localStorage.getItem("token");
+        const doctorData = localStorage.getItem("doctor");
+        const testMode = localStorage.getItem("isTestMode");
+
+        if (token && doctorData) {
+          const parsedDoctor = JSON.parse(doctorData);
+          setDoctor(parsedDoctor);
+          setIsTestMode(testMode === "true");
+          lastDoctorIdRef.current = parsedDoctor._id;
+          
+          const storedPatients = loadPatientsFromStorage();
+          if (storedPatients.length > 0) {
+            setPatients(storedPatients);
+            hasLoadedPatientsRef.current = true;
+          } else if (testMode === "true" && parsedDoctor && !parsedDoctor.isAdmin) {
+            const mockPatients = createMockPatients();
+            setPatients(mockPatients);
+            hasLoadedPatientsRef.current = true;
+          }
+        }
+      } catch (error) {
+        console.error("Erreur vérification auth:", error);
+        localStorage.removeItem("token");
+        localStorage.removeItem("doctor");
+        localStorage.removeItem("patients");
+        localStorage.removeItem("isTestMode");
+        setDoctor(null);
+        setPatients([]);
+        setIsTestMode(false);
+      } finally {
+        setIsInitialized(true);
+      }
+    };
+
+    checkAuth();
+  }, [isInitialized]);
+
+  // ============= EFFECT: LOAD PATIENTS WHEN DOCTOR CHANGES =============
+  
+  useEffect(() => {
+    // Ne charger les patients que si:
+    // 1. L'app est initialisée
+    // 2. Il y a un docteur
+    // 3. Le docteur est actif
+    // 4. Le docteur n'est pas admin
+    // 5. Les patients n'ont pas déjà été chargés pour ce docteur
+    // 6. Le docteur a changé
+    
+    if (!isInitialized || !doctor || !doctor.isActive || doctor.isAdmin) {
+      return;
+    }
+
+    // Si le docteur a changé, réinitialiser le flag
+    if (lastDoctorIdRef.current !== doctor._id) {
+      hasLoadedPatientsRef.current = false;
+      lastDoctorIdRef.current = doctor._id;
+    }
+
+    // Charger les patients seulement si pas déjà chargés
+    if (!hasLoadedPatientsRef.current && !fetchPatientsInProgressRef.current) {
+      console.log("🔄 Chargement automatique des patients pour le docteur:", doctor._id);
+      fetchPatients();
+    }
+  }, [isInitialized, doctor, fetchPatients]);
+
+  // ============= EFFECT: CHECK OVERDUE APPOINTMENTS =============
+  
+  useEffect(() => {
+    if (!isInitialized || !doctor || doctor.isAdmin) return;
+
+    const interval = setInterval(() => {
+      checkAndUpdateOverdueAppointments();
+    }, 60000);
+
+    return () => clearInterval(interval);
+  }, [isInitialized, doctor, checkAndUpdateOverdueAppointments]);
+
+  // ============= EFFECT: CHECK USER STATUS =============
+  
   useEffect(() => {
     if (isInitialized) {
       checkUserStatusAndRedirect();
     }
-  }, [isInitialized, checkUserStatusAndRedirect]);
+  }, [isInitialized, pathname, checkUserStatusAndRedirect]);
 
+  // ============= CONTEXT VALUE =============
+  
   const value = {
     doctor,
     patients,
@@ -1019,6 +1152,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     useTestAccount,
     isTestMode,
     refreshPatients,
+    checkAndUpdateOverdueAppointments,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

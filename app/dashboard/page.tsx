@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useState, useRef, useMemo } from "react";
+import type React from "react";
+
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { useRouter } from "next/navigation";
 import {
@@ -27,6 +29,8 @@ import {
   Bell,
   MessageSquare,
   Menu,
+  Save,
+  FileText,
 } from "lucide-react";
 
 interface Patient {
@@ -51,6 +55,10 @@ interface Patient {
 interface FilterOptions {
   statut: string[];
   smsEnvoye: boolean | null;
+  dateRange: {
+    start: Date | null;
+    end: Date | null;
+  };
 }
 
 export default function DashboardPage() {
@@ -67,16 +75,16 @@ export default function DashboardPage() {
     isTestMode,
     refreshPatients,
   } = useAuth();
-  
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [currentDateTime, setCurrentDateTime] = useState<string>("");
   const [currentTime, setCurrentTime] = useState<string>("");
   const [isImporting, setIsImporting] = useState(false);
+  const [isSendingSMS, setIsSendingSMS] = useState(false);
+  const [isAdjustingTime, setIsAdjustingTime] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [importProgress, setImportProgress] = useState(0);
-  const [importMessage, setImportMessage] = useState<string>("");
 
   const [searchTerm, setSearchTerm] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
@@ -89,13 +97,18 @@ export default function DashboardPage() {
   const [filters, setFilters] = useState<FilterOptions>({
     statut: [],
     smsEnvoye: null,
+    dateRange: {
+      start: null,
+      end: null,
+    },
   });
   const [selectedPatients, setSelectedPatients] = useState<string[]>([]);
-  const [showPatientDetail, setShowPatientDetail] = useState<string | null>(null);
+  const [showPatientDetail, setShowPatientDetail] = useState<string | null>(
+    null
+  );
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  // Vérifier l'authentification
   useEffect(() => {
     if (loading) return;
 
@@ -114,12 +127,13 @@ export default function DashboardPage() {
       return;
     }
 
-    // Charger les patients
-    console.log("🔄 Chargement des patients, mode test:", isTestMode);
-    fetchPatients();
-  }, [doctor, loading, router, fetchPatients, isTestMode]);
+    // Vérifier si on a besoin de charger les patients
+    if (patients.length === 0) {
+      console.log("🔄 Chargement initial des patients");
+      fetchPatients();
+    }
+  }, [doctor, loading, router, fetchPatients, patients.length]);
 
-  // Mettre à jour l'heure
   useEffect(() => {
     const updateDateTime = () => {
       const now = new Date();
@@ -143,13 +157,111 @@ export default function DashboardPage() {
     return () => clearInterval(interval);
   }, []);
 
-  // Gestion de la sélection de fichier
+  const checkAndMarkPastAppointments = useCallback(async () => {
+    const now = new Date();
+
+    for (const patient of patients) {
+      if (patient.statut === "termine") continue;
+
+      const appointmentTime = new Date(patient.heureRendezVous);
+
+      if (appointmentTime < now) {
+        try {
+          const minutesPassed = Math.max(
+            0,
+            Math.floor(
+              (now.getTime() - appointmentTime.getTime()) / (60 * 1000)
+            )
+          );
+
+          await updatePatient(patient._id, {
+            statut: "termine",
+            retardMinutes: minutesPassed,
+            notes: patient.notes
+              ? `${
+                  patient.notes
+                }\n[Auto] RDV terminé automatiquement le ${now.toLocaleDateString(
+                  "fr-FR"
+                )} à ${now.toLocaleTimeString("fr-FR", {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}`
+              : `[Auto] RDV terminé automatiquement le ${now.toLocaleDateString(
+                  "fr-FR"
+                )} à ${now.toLocaleTimeString("fr-FR", {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}`,
+          });
+        } catch (error) {
+          console.error("Erreur mise à jour statut:", error);
+        }
+      }
+    }
+  }, [patients, updatePatient]);
+
+  const checkDelayedAppointments = useCallback(async () => {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+    for (const patient of patients) {
+      if (patient.statut === "termine" || patient.statut === "retarde")
+        continue;
+
+      const appointmentTime = new Date(patient.heureRendezVous);
+      const appointmentDate = new Date(
+        appointmentTime.getFullYear(),
+        appointmentTime.getMonth(),
+        appointmentTime.getDate()
+      );
+
+      if (
+        appointmentDate.getTime() === today.getTime() &&
+        appointmentTime < now
+      ) {
+        const minutesPassed = Math.floor(
+          (now.getTime() - appointmentTime.getTime()) / (60 * 1000)
+        );
+
+        if (
+          minutesPassed > 0 &&
+          (patient.statut === "en_attente" || patient.statut === "en_cours")
+        ) {
+          try {
+            await updatePatient(patient._id, {
+              statut: "retarde",
+              retardMinutes: minutesPassed,
+            });
+          } catch (error) {
+            console.error("Erreur mise à jour retard:", error);
+          }
+        }
+      }
+    }
+  }, [patients, updatePatient]);
+
+  useEffect(() => {
+    if (patients.length === 0) return;
+
+    const manageAppointmentStatus = async () => {
+      await checkDelayedAppointments();
+      await checkAndMarkPastAppointments();
+    };
+
+    manageAppointmentStatus();
+    const interval = setInterval(manageAppointmentStatus, 60000);
+
+    return () => clearInterval(interval);
+  }, [patients, checkDelayedAppointments, checkAndMarkPastAppointments]);
+
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    console.log("📁 Fichier sélectionné:", file);
+    console.log("Fichier sélectionné:", file);
     if (file) {
       const validExtensions = [".csv", ".xlsx", ".xls"];
-      const fileExtension = file.name.toLowerCase().slice(file.name.lastIndexOf("."));
+      const fileExtension = file.name
+        .toLowerCase()
+        .slice(file.name.lastIndexOf("."));
 
       if (!validExtensions.includes(fileExtension)) {
         alert("Format non supporté. Utilisez .csv, .xlsx ou .xls");
@@ -157,11 +269,9 @@ export default function DashboardPage() {
       }
 
       setSelectedFile(file);
-      setImportMessage("");
     }
   };
 
-  // Gestion de l'import - CORRIGÉ POUR MODE TEST
   const handleImport = async () => {
     if (!selectedFile) {
       alert("Veuillez sélectionner un fichier");
@@ -170,10 +280,8 @@ export default function DashboardPage() {
 
     setIsImporting(true);
     setImportProgress(0);
-    setImportMessage("Début de l'import...");
 
     try {
-      // Simulation de progression
       const progressInterval = setInterval(() => {
         setImportProgress((prev) => {
           if (prev >= 90) {
@@ -184,93 +292,32 @@ export default function DashboardPage() {
         });
       }, 200);
 
-      console.log("🚀 Début de l'import en mode test...");
       const result = await importPatients(selectedFile);
 
       clearInterval(progressInterval);
       setImportProgress(100);
 
       if (result.success) {
-        console.log("✅ Import réussi en mode test:", result.message);
-        console.log("📊 Patients après import:", result.data?.length);
-        
-        setImportMessage(result.message);
-        
-        // Afficher le message de succès
-        setTimeout(() => {
-          alert(result.message);
-        }, 300);
-        
-        // Réinitialiser le fichier
+        alert(result.message);
         setSelectedFile(null);
         if (fileInputRef.current) {
           fileInputRef.current.value = "";
         }
 
-        // FORCER le rafraîchissement de la liste
         setTimeout(() => {
           fetchPatients();
         }, 500);
       } else {
-        console.error("❌ Erreur import:", result.message);
-        setImportMessage(`Erreur: ${result.message}`);
-        alert(`Erreur: ${result.message}`);
+        alert(result.message);
       }
     } catch (error: any) {
-      console.error("❌ Erreur d'import:", error);
-      setImportMessage(`Erreur: ${error.message}`);
       alert(`Erreur d'import: ${error.message}`);
     } finally {
       setIsImporting(false);
-      setTimeout(() => {
-        setImportProgress(0);
-        setImportMessage("");
-      }, 3000);
+      setTimeout(() => setImportProgress(0), 2000);
     }
   };
 
-  // Gestion de la suppression
-  const handleDeletePatient = async (patientId: string) => {
-    if (!confirm("Êtes-vous sûr de vouloir supprimer ce patient ?")) {
-      return;
-    }
-
-    try {
-      console.log("🗑️ Suppression du patient:", patientId);
-      const result = await deletePatient(patientId);
-      
-      if (result.success) {
-        console.log("✅ Suppression réussie:", result.message);
-        alert(result.message);
-        
-        // Rafraîchir la liste
-        setTimeout(() => {
-          fetchPatients();
-        }, 300);
-      } else {
-        console.error("❌ Erreur suppression:", result.message);
-        alert(`Erreur: ${result.message}`);
-      }
-    } catch (error: any) {
-      console.error("❌ Erreur suppression:", error);
-      alert(`Erreur suppression: ${error.message}`);
-    }
-  };
-
-  // Rafraîchir la liste
-  const handleRefreshPatients = async () => {
-    setIsRefreshing(true);
-    try {
-      await refreshPatients();
-      alert("Liste des patients rafraîchie avec succès !");
-    } catch (error: any) {
-      alert(`Erreur rafraîchissement: ${error.message}`);
-    } finally {
-      setIsRefreshing(false);
-    }
-  };
-
-  // Ajuster tous les rendez-vous
   const adjustAllAppointments = async (minutes: number) => {
     const now = new Date();
     const patientsToUpdate = patients.filter(
@@ -281,6 +328,8 @@ export default function DashboardPage() {
       alert("Aucun rendez-vous à ajuster");
       return;
     }
+
+    setIsAdjustingTime(true);
 
     try {
       const updatePromises = patientsToUpdate.map(async (patient) => {
@@ -296,17 +345,22 @@ export default function DashboardPage() {
 
       await Promise.all(updatePromises);
 
-      alert(`Tous les rendez-vous ajustés de ${minutes > 0 ? "+" : ""}${minutes} minutes`);
+      alert(
+        `Tous les rendez-vous ajustés de ${
+          minutes > 0 ? "+" : ""
+        }${minutes} minutes`
+      );
 
       setTimeout(() => {
         fetchPatients();
       }, 500);
     } catch (error: any) {
       alert(`Erreur ajustement: ${error.message}`);
+    } finally {
+      setIsAdjustingTime(false);
     }
   };
 
-  // Envoyer SMS en masse
   const handleSendBulkSMS = async () => {
     const waitingPatients = patients.filter((p) => p.statut === "en_attente");
 
@@ -314,6 +368,8 @@ export default function DashboardPage() {
       alert("Aucun patient en attente pour envoyer des SMS");
       return;
     }
+
+    setIsSendingSMS(true);
 
     try {
       const result = await sendBulkDelaySMS();
@@ -328,10 +384,11 @@ export default function DashboardPage() {
       }
     } catch (error: any) {
       alert(`Erreur envoi SMS: ${error.message}`);
+    } finally {
+      setIsSendingSMS(false);
     }
   };
 
-  // Changer le statut d'un patient
   const handleChangePatientStatus = async (
     patientId: string,
     currentStatus: string
@@ -361,7 +418,20 @@ export default function DashboardPage() {
     }
   };
 
-  // Gestion de la sélection
+  const handleDeletePatient = async (patientId: string) => {
+    if (confirm("Êtes-vous sûr de vouloir supprimer ce patient ?")) {
+      try {
+        const result = await deletePatient(patientId);
+        if (result.success) {
+          alert("Patient supprimé avec succès");
+          fetchPatients();
+        }
+      } catch (error: any) {
+        alert(`Erreur suppression: ${error.message}`);
+      }
+    }
+  };
+
   const togglePatientSelection = (patientId: string) => {
     setSelectedPatients((prev) =>
       prev.includes(patientId)
@@ -378,7 +448,37 @@ export default function DashboardPage() {
     }
   };
 
-  // Filtrer et trier les patients
+  const handleRefreshPatients = async () => {
+    setIsRefreshing(true);
+    try {
+      await refreshPatients();
+      alert("Patients rafraîchis avec succès");
+    } catch (error: any) {
+      alert(`Erreur rafraîchissement: ${error.message}`);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  const handleExportLocalData = () => {
+    try {
+      const dataStr = JSON.stringify(patients, null, 2);
+      const dataBlob = new Blob([dataStr], { type: 'application/json' });
+      const url = window.URL.createObjectURL(dataBlob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `patients_backup_${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      alert('Données exportées avec succès !');
+    } catch (error) {
+      console.error('Erreur export:', error);
+      alert('Erreur lors de l\'export');
+    }
+  };
+
   const filteredPatients = useMemo(() => {
     return patients
       .filter((patient) => {
@@ -394,7 +494,13 @@ export default function DashboardPage() {
         const matchesSMS =
           filters.smsEnvoye === null || patient.smsEnvoye === filters.smsEnvoye;
 
-        return matchesSearch && matchesStatus && matchesSMS;
+        const appointmentDate = new Date(patient.heureRendezVous);
+        const matchesDateRange =
+          (!filters.dateRange.start ||
+            appointmentDate >= filters.dateRange.start) &&
+          (!filters.dateRange.end || appointmentDate <= filters.dateRange.end);
+
+        return matchesSearch && matchesStatus && matchesSMS && matchesDateRange;
       })
       .sort((a, b) => {
         let aValue, bValue;
@@ -421,13 +527,11 @@ export default function DashboardPage() {
       });
   }, [patients, searchTerm, filters, sortField, sortDirection]);
 
-  // Calculs pour la pagination
   const totalPages = Math.ceil(filteredPatients.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
   const endIndex = startIndex + itemsPerPage;
   const currentPatients = filteredPatients.slice(startIndex, endIndex);
 
-  // Statistiques
   const stats = {
     total: patients.length,
     enAttente: patients.filter((p) => p.statut === "en_attente").length,
@@ -438,7 +542,6 @@ export default function DashboardPage() {
     selected: selectedPatients.length,
   };
 
-  // Couleurs des statuts
   const getStatusColor = (statut: string) => {
     switch (statut) {
       case "en_attente":
@@ -454,7 +557,6 @@ export default function DashboardPage() {
     }
   };
 
-  // Formatter la date
   const formatDate = (dateString: string) => {
     const date = new Date(dateString);
     return date.toLocaleDateString("fr-FR", {
@@ -466,7 +568,6 @@ export default function DashboardPage() {
     });
   };
 
-  // Formatter l'heure
   const formatTime = (dateString: string) => {
     const date = new Date(dateString);
     return date.toLocaleTimeString("fr-FR", {
@@ -488,7 +589,6 @@ export default function DashboardPage() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Header */}
       <header className="bg-white shadow-sm border-b border-gray-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
@@ -503,14 +603,25 @@ export default function DashboardPage() {
               </h1>
             </div>
             <div className="hidden md:flex items-center space-x-4">
-              <span className="text-sm text-gray-600">Dr. {doctor.nomComplet}</span>
+              <span className="text-sm text-gray-600">
+                Dr. {doctor.nomComplet}
+              </span>
               <button
                 onClick={handleRefreshPatients}
-                disabled={isRefreshing || loading}
-                className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-                title="Rafraîchir"
+                disabled={isRefreshing}
+                className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors flex items-center gap-2"
+                title="Rafraîchir les données"
               >
-                <RefreshCw className={`w-5 h-5 ${isRefreshing ? "animate-spin" : ""}`} />
+                <RefreshCw
+                  className={`w-5 h-5 ${isRefreshing ? "animate-spin" : ""}`}
+                />
+              </button>
+              <button
+                onClick={handleExportLocalData}
+                className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors flex items-center gap-2"
+                title="Exporter données locales"
+              >
+                <Save className="w-5 h-5" />
               </button>
               <button
                 onClick={logout}
@@ -529,18 +640,27 @@ export default function DashboardPage() {
         </div>
       </header>
 
-      {/* Menu mobile */}
+      {/* Mobile menu */}
       {mobileMenuOpen && (
         <div className="md:hidden bg-white border-b border-gray-200 px-4 py-3">
           <div className="space-y-3">
             <div className="text-sm text-gray-600">Dr. {doctor.nomComplet}</div>
             <button
               onClick={handleRefreshPatients}
-              disabled={isRefreshing || loading}
+              disabled={isRefreshing}
               className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg"
             >
-              <RefreshCw className={`w-5 h-5 ${isRefreshing ? "animate-spin" : ""}`} />
+              <RefreshCw
+                className={`w-5 h-5 ${isRefreshing ? "animate-spin" : ""}`}
+              />
               Rafraîchir
+            </button>
+            <button
+              onClick={handleExportLocalData}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg"
+            >
+              <Save className="w-5 h-5" />
+              Exporter
             </button>
             <button
               onClick={logout}
@@ -552,47 +672,60 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Contenu principal */}
+      {/* Main container */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Cartes de statistiques */}
+        {/* Stats cards */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-8">
           <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-200">
-            <p className="text-xs text-gray-600 font-medium mb-1">TOTAL</p>
+            <p className="text-xs text-gray-600 font-medium mb-1">TOTAL PATIENTS</p>
             <p className="text-2xl font-bold text-gray-900">{stats.total}</p>
             <Users className="w-5 h-5 text-gray-400 mt-2" />
           </div>
+
           <div className="bg-white p-4 rounded-lg shadow-sm border border-yellow-200">
-            <p className="text-xs text-yellow-600 font-medium mb-1">ATTENTE</p>
-            <p className="text-2xl font-bold text-yellow-600">{stats.enAttente}</p>
+            <p className="text-xs text-yellow-600 font-medium mb-1">
+              PATIENTS EN ATTENTE
+            </p>
+            <p className="text-2xl font-bold text-yellow-600">
+              {stats.enAttente}
+            </p>
             <Clock className="w-5 h-5 text-yellow-500 mt-2" />
           </div>
+
           <div className="bg-white p-4 rounded-lg shadow-sm border border-blue-200">
-            <p className="text-xs text-blue-600 font-medium mb-1">EN COURS</p>
+            <p className="text-xs text-blue-600 font-medium mb-1">PATIENTS EN COURS</p>
             <p className="text-2xl font-bold text-blue-600">{stats.enCours}</p>
             <Bell className="w-5 h-5 text-blue-500 mt-2" />
           </div>
+
           <div className="bg-white p-4 rounded-lg shadow-sm border border-red-200">
-            <p className="text-xs text-red-600 font-medium mb-1">RETARD</p>
+            <p className="text-xs text-red-600 font-medium mb-1">PATIENTS RETARDÉS</p>
             <p className="text-2xl font-bold text-red-600">{stats.retarde}</p>
             <AlertCircle className="w-5 h-5 text-red-500 mt-2" />
           </div>
+
           <div className="bg-white p-4 rounded-lg shadow-sm border border-green-200">
-            <p className="text-xs text-green-600 font-medium mb-1">TERMINÉ</p>
+            <p className="text-xs text-green-600 font-medium mb-1">CONSULTATIONS TERMINEES</p>
             <p className="text-2xl font-bold text-green-600">{stats.termine}</p>
             <CheckCircle className="w-5 h-5 text-green-500 mt-2" />
           </div>
+
           <div className="bg-white p-4 rounded-lg shadow-sm border border-purple-200">
-            <p className="text-xs text-purple-600 font-medium mb-1">SMS</p>
-            <p className="text-2xl font-bold text-purple-600">{stats.smsEnvoye}</p>
+            <p className="text-xs text-purple-600 font-medium mb-1">
+              SMS ENVOYÉS
+            </p>
+            <p className="text-2xl font-bold text-purple-600">
+              {stats.smsEnvoye}
+            </p>
             <Send className="w-5 h-5 text-purple-500 mt-2" />
           </div>
         </div>
 
-        {/* Section actions */}
+        {/* Actions Section */}
         <div className="mb-8">
           <div className="rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-600 p-6 shadow-xl">
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
-              {/* Heure */}
+              {/* Heure actuelle */}
               <div className="bg-white/15 backdrop-blur-xl rounded-2xl p-6 text-white">
                 <p className="text-sm opacity-80 mb-3">Heure actuelle</p>
                 <div className="flex items-center gap-4">
@@ -600,25 +733,33 @@ export default function DashboardPage() {
                     <Clock className="w-7 h-7" />
                   </div>
                   <div>
-                    <div className="text-3xl font-bold tracking-widest">{currentTime}</div>
-                    <div className="text-sm opacity-80 mt-1">{currentDateTime}</div>
+                    <div className="text-3xl font-bold tracking-widest">
+                      {currentTime}
+                    </div>
+                    <div className="text-sm opacity-80 mt-1">
+                      {currentDateTime}
+                    </div>
                   </div>
                 </div>
               </div>
 
-              {/* Ajustement horaire */}
+              {/* Ajuster horaires */}
               <div className="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
-                <p className="text-sm font-medium text-gray-700 mb-4">Ajuster horaires</p>
+                <p className="text-sm font-medium text-gray-700 mb-4">
+                  Ajuster les horaires
+                </p>
                 <div className="flex gap-3">
                   <button
                     onClick={() => adjustAllAppointments(-5)}
-                    className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl bg-gray-100 hover:bg-gray-200 transition"
+                    disabled={isAdjustingTime}
+                    className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl bg-gray-100 hover:bg-gray-200 transition disabled:opacity-50"
                   >
                     <Minus className="w-4 h-4" />5 min
                   </button>
                   <button
                     onClick={() => adjustAllAppointments(5)}
-                    className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white transition"
+                    disabled={isAdjustingTime}
+                    className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white transition disabled:opacity-50"
                   >
                     <Plus className="w-4 h-4" />5 min
                   </button>
@@ -629,8 +770,12 @@ export default function DashboardPage() {
               <div className="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
                 <div className="flex justify-between items-start mb-4">
                   <div>
-                    <h3 className="font-semibold text-gray-900">SMS patients</h3>
-                    <p className="text-sm text-gray-500 mt-1">{stats.enAttente} en attente</p>
+                    <h3 className="font-semibold text-gray-900">
+                      SMS patients
+                    </h3>
+                    <p className="text-sm text-gray-500 mt-1">
+                      {stats.enAttente} en attente
+                    </p>
                   </div>
                   <div className="p-2 bg-green-100 rounded-lg">
                     <MessageSquare className="w-5 h-5 text-green-600" />
@@ -638,22 +783,21 @@ export default function DashboardPage() {
                 </div>
                 <button
                   onClick={handleSendBulkSMS}
-                  disabled={stats.enAttente === 0}
+                  disabled={isSendingSMS || stats.enAttente === 0}
                   className="w-full py-3 rounded-xl bg-green-600 hover:bg-green-700 text-white font-medium transition disabled:opacity-50"
                 >
-                  Notifier
+                  {isSendingSMS ? "Envoi..." : "Notifier"}
                 </button>
               </div>
 
-              {/* Import - SECTION CRITIQUE CORRIGÉE */}
+              {/* Import */}
               <div className="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
                 <div className="flex justify-between items-start mb-4">
                   <div>
-                    <h3 className="font-semibold text-gray-900">Import patients</h3>
+                    <h3 className="font-semibold text-gray-900">
+                      Import patients
+                    </h3>
                     <p className="text-sm text-gray-500 mt-1">CSV, XLSX</p>
-                    {isTestMode && (
-                      <p className="text-xs text-yellow-600 mt-1">Mode test activé</p>
-                    )}
                   </div>
                   <div className="p-2 bg-blue-100 rounded-lg">
                     <Upload className="w-5 h-5 text-blue-600" />
@@ -662,6 +806,7 @@ export default function DashboardPage() {
 
                 <input
                   ref={fileInputRef}
+                  id="file-upload"
                   type="file"
                   accept=".csv,.xlsx,.xls"
                   onChange={handleFileSelect}
@@ -669,32 +814,33 @@ export default function DashboardPage() {
                 />
 
                 <label
-                  onClick={() => fileInputRef.current?.click()}
+                  htmlFor="file-upload"
                   className="block p-4 text-center border-2 border-dashed rounded-xl bg-gray-50 hover:bg-gray-100 cursor-pointer mb-3"
                 >
                   {selectedFile ? (
                     <>
-                      <Upload className="w-8 h-8 mx-auto text-blue-500" />
-                      <p className="text-sm font-medium text-gray-900 mt-2">{selectedFile.name}</p>
+                      <p className="text-sm font-medium text-gray-900">
+                        {selectedFile.name}
+                      </p>
                       <p className="text-xs text-gray-500 mt-1">
-                        {(selectedFile.size / 1024).toFixed(2)} KB
+                        Cliquez pour changer de fichier
                       </p>
                     </>
                   ) : (
                     <>
                       <Upload className="w-8 h-8 mx-auto text-gray-400" />
-                      <p className="text-sm text-gray-600 mt-2">Cliquez pour choisir un fichier</p>
-                      <p className="text-xs text-gray-400 mt-1">CSV, Excel (.csv, .xlsx, .xls)</p>
+                      <p className="text-sm text-gray-600 mt-2">
+                        Cliquez pour choisir un fichier
+                      </p>
+                      <p className="text-xs text-gray-400 mt-1">
+                        CSV, Excel (.csv, .xlsx, .xls)
+                      </p>
                     </>
                   )}
                 </label>
 
                 {importProgress > 0 && (
                   <div className="mb-3">
-                    <div className="flex justify-between text-xs text-gray-600 mb-1">
-                      <span>Import en cours...</span>
-                      <span>{importProgress}%</span>
-                    </div>
                     <div className="h-2 bg-gray-200 rounded-full">
                       <div
                         className="h-2 bg-blue-600 rounded-full transition-all"
@@ -704,42 +850,19 @@ export default function DashboardPage() {
                   </div>
                 )}
 
-                {importMessage && (
-                  <div className={`mb-3 p-2 rounded text-sm ${
-                    importMessage.includes('Erreur') 
-                      ? 'bg-red-100 text-red-700' 
-                      : 'bg-green-100 text-green-700'
-                  }`}>
-                    {importMessage}
-                  </div>
-                )}
-
                 <button
                   onClick={handleImport}
                   disabled={!selectedFile || isImporting}
-                  className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium transition disabled:opacity-50 flex items-center justify-center gap-2"
+                  className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium transition disabled:opacity-50"
                 >
-                  {isImporting ? (
-                    <>
-                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-                      Import...
-                    </>
-                  ) : (
-                    'Importer'
-                  )}
+                  {isImporting ? "Import..." : "Importer"}
                 </button>
-
-                {isTestMode && !selectedFile && (
-                  <p className="text-xs text-gray-500 mt-2 text-center">
-                    En mode test: choisissez n'importe quel fichier
-                  </p>
-                )}
               </div>
             </div>
           </div>
         </div>
 
-        {/* Recherche et filtres */}
+        {/* Search and Filters */}
         <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 mb-8">
           <div className="flex flex-col md:flex-row gap-4 mb-4">
             <div className="flex-1">
@@ -775,47 +898,63 @@ export default function DashboardPage() {
             >
               <Filter className="w-4 h-4" />
               Filtres
+              {Object.values(filters).some((v) =>
+                Array.isArray(v) ? v.length > 0 : v !== null
+              ) && (
+                <span className="bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
+                  !
+                </span>
+              )}
             </button>
           </div>
 
+          {/* Advanced filters */}
           {showFilters && (
             <div className="mt-6 p-4 bg-gray-50 rounded-lg border border-gray-200">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-900 mb-2">Statut</label>
+                  <label className="block text-sm font-medium text-gray-900 mb-2">
+                    Statut
+                  </label>
                   <div className="space-y-2">
-                    {["en_attente", "en_cours", "retarde", "termine"].map((statut) => (
-                      <label key={statut} className="flex items-center">
-                        <input
-                          type="checkbox"
-                          checked={filters.statut.includes(statut)}
-                          onChange={(e) => {
-                            setFilters((prev) => ({
-                              ...prev,
-                              statut: e.target.checked
-                                ? [...prev.statut, statut]
-                                : prev.statut.filter((s) => s !== statut),
-                            }));
-                          }}
-                          className="rounded border-gray-300 text-blue-600"
-                        />
-                        <span className="ml-2 text-sm text-gray-700 capitalize">
-                          {statut.replace("_", " ")}
-                        </span>
-                      </label>
-                    ))}
+                    {["en_attente", "en_cours", "retarde", "termine"].map(
+                      (statut) => (
+                        <label key={statut} className="flex items-center">
+                          <input
+                            type="checkbox"
+                            checked={filters.statut.includes(statut)}
+                            onChange={(e) => {
+                              setFilters((prev) => ({
+                                ...prev,
+                                statut: e.target.checked
+                                  ? [...prev.statut, statut]
+                                  : prev.statut.filter((s) => s !== statut),
+                              }));
+                            }}
+                            className="rounded border-gray-300 text-blue-600"
+                          />
+                          <span className="ml-2 text-sm text-gray-700 capitalize">
+                            {statut.replace("_", " ")}
+                          </span>
+                        </label>
+                      )
+                    )}
                   </div>
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-900 mb-2">SMS</label>
+                  <label className="block text-sm font-medium text-gray-900 mb-2">
+                    SMS
+                  </label>
                   <div className="space-y-2">
                     <label className="flex items-center">
                       <input
                         type="radio"
                         name="smsFilter"
                         checked={filters.smsEnvoye === null}
-                        onChange={() => setFilters((prev) => ({ ...prev, smsEnvoye: null }))}
+                        onChange={() =>
+                          setFilters((prev) => ({ ...prev, smsEnvoye: null }))
+                        }
                         className="border-gray-300 text-blue-600"
                       />
                       <span className="ml-2 text-sm text-gray-700">Tous</span>
@@ -825,27 +964,44 @@ export default function DashboardPage() {
                         type="radio"
                         name="smsFilter"
                         checked={filters.smsEnvoye === true}
-                        onChange={() => setFilters((prev) => ({ ...prev, smsEnvoye: true }))}
+                        onChange={() =>
+                          setFilters((prev) => ({ ...prev, smsEnvoye: true }))
+                        }
                         className="border-gray-300 text-blue-600"
                       />
-                      <span className="ml-2 text-sm text-gray-700">Envoyés</span>
+                      <span className="ml-2 text-sm text-gray-700">
+                        Envoyés
+                      </span>
                     </label>
                     <label className="flex items-center">
                       <input
                         type="radio"
                         name="smsFilter"
                         checked={filters.smsEnvoye === false}
-                        onChange={() => setFilters((prev) => ({ ...prev, smsEnvoye: false }))}
+                        onChange={() =>
+                          setFilters((prev) => ({
+                            ...prev,
+                            smsEnvoye: false,
+                          }))
+                        }
                         className="border-gray-300 text-blue-600"
                       />
-                      <span className="ml-2 text-sm text-gray-700">Non envoyés</span>
+                      <span className="ml-2 text-sm text-gray-700">
+                        Non envoyés
+                      </span>
                     </label>
                   </div>
                 </div>
 
                 <div className="flex flex-col justify-end gap-2">
                   <button
-                    onClick={() => setFilters({ statut: [], smsEnvoye: null })}
+                    onClick={() =>
+                      setFilters({
+                        statut: [],
+                        smsEnvoye: null,
+                        dateRange: { start: null, end: null },
+                      })
+                    }
                     className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors text-sm font-medium"
                   >
                     Réinitialiser
@@ -862,39 +1018,69 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {/* Tableau des patients */}
+        {/* Patients Table */}
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+          {/* Table header */}
           <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-lg font-semibold text-gray-900">Rendez-vous du Jour</h3>
+                <h3 className="text-lg font-semibold text-gray-900">
+                  Rendez-vous du Jour
+                </h3>
                 <p className="text-sm text-gray-600 mt-1">
                   {filteredPatients.length} patient(s) trouvé(s)
                   {isTestMode && (
-                    <span className="ml-2 text-xs text-yellow-600">(Mode Test)</span>
-                  )}
-                  {loading && (
-                    <span className="ml-2 text-xs text-blue-600">Chargement...</span>
+                    <span className="ml-2 text-xs text-yellow-600">
+                      (Mode Test)
+                    </span>
                   )}
                 </p>
               </div>
 
-              <div className="flex items-center gap-2">
-                <span className="text-sm text-gray-600">Afficher</span>
-                <select
-                  value={itemsPerPage}
-                  onChange={(e) => {
-                    setItemsPerPage(Number(e.target.value));
-                    setCurrentPage(1);
-                  }}
-                  className="border border-gray-300 rounded-lg px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value={5}>5</option>
-                  <option value={10}>10</option>
-                  <option value={25}>25</option>
-                  <option value={50}>50</option>
-                </select>
-                <span className="text-sm text-gray-600">par page</span>
+              <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-gray-600 hidden sm:inline">
+                    Afficher
+                  </span>
+                  <select
+                    value={itemsPerPage}
+                    onChange={(e) => {
+                      setItemsPerPage(Number(e.target.value));
+                      setCurrentPage(1);
+                    }}
+                    className="border border-gray-300 rounded-lg px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value={5}>5</option>
+                    <option value={10}>10</option>
+                    <option value={25}>25</option>
+                    <option value={50}>50</option>
+                  </select>
+                  <span className="text-sm text-gray-600 hidden sm:inline">
+                    par page
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <select
+                    value={sortField}
+                    onChange={(e) => setSortField(e.target.value as any)}
+                    className="border border-gray-300 rounded-lg px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="heureRendezVous">Heure RDV</option>
+                    <option value="nomComplet">Nom</option>
+                    <option value="statut">Statut</option>
+                  </select>
+                  <button
+                    onClick={() =>
+                      setSortDirection((prev) =>
+                        prev === "asc" ? "desc" : "asc"
+                      )
+                    }
+                    className="px-2 py-1 hover:bg-gray-200 rounded text-gray-700"
+                  >
+                    {sortDirection === "asc" ? "↑" : "↓"}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -902,7 +1088,9 @@ export default function DashboardPage() {
           {filteredPatients.length === 0 ? (
             <div className="text-center py-12">
               <Users className="mx-auto w-12 h-12 text-gray-400" />
-              <h3 className="mt-4 text-lg font-medium text-gray-900">Aucun patient trouvé</h3>
+              <h3 className="mt-4 text-lg font-medium text-gray-900">
+                Aucun patient trouvé
+              </h3>
               <p className="mt-2 text-sm text-gray-500">
                 {searchTerm || showFilters
                   ? "Aucun résultat pour vos critères"
@@ -910,13 +1098,14 @@ export default function DashboardPage() {
               </p>
               <button
                 onClick={handleRefreshPatients}
-                className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
               >
-                Rafraîchir la liste
+                Rafraîchir
               </button>
             </div>
           ) : (
             <>
+              {/* Table - responsive */}
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead className="border-b border-gray-200 bg-white">
@@ -925,82 +1114,127 @@ export default function DashboardPage() {
                         <input
                           type="checkbox"
                           checked={
-                            selectedPatients.length === filteredPatients.length &&
+                            selectedPatients.length ===
+                              filteredPatients.length &&
                             filteredPatients.length > 0
                           }
                           onChange={toggleSelectAll}
                           className="rounded border-gray-300 text-blue-600"
                         />
                       </th>
-                      <th className="px-4 py-3 text-left font-semibold text-gray-900">Patient</th>
-                      <th className="px-4 py-3 text-left font-semibold text-gray-900 hidden sm:table-cell">Téléphone</th>
-                      <th className="px-4 py-3 text-left font-semibold text-gray-900">RDV</th>
-                      <th className="px-4 py-3 text-left font-semibold text-gray-900">Statut</th>
-                      <th className="px-4 py-3 text-left font-semibold text-gray-900 hidden sm:table-cell">SMS</th>
-                      <th className="px-4 py-3 text-left font-semibold text-gray-900">Actions</th>
+                      <th className="px-4 py-3 text-left font-semibold text-gray-900">
+                        Patient
+                      </th>
+                      <th className="px-4 py-3 text-left font-semibold text-gray-900 hidden sm:table-cell">
+                        Téléphone
+                      </th>
+                      <th className="px-4 py-3 text-left font-semibold text-gray-900">
+                        RDV
+                      </th>
+                      <th className="px-4 py-3 text-left font-semibold text-gray-900">
+                        Statut
+                      </th>
+                      <th className="px-4 py-3 text-left font-semibold text-gray-900 hidden sm:table-cell">
+                        SMS
+                      </th>
+                      <th className="px-4 py-3 text-left font-semibold text-gray-900">
+                        Actions
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
                     {currentPatients.map((patient) => {
                       const appointmentDate = new Date(patient.heureRendezVous);
                       const now = new Date();
-                      const isToday = appointmentDate.toDateString() === now.toDateString();
+                      const isToday =
+                        appointmentDate.toDateString() === now.toDateString();
+                      const isPast = appointmentDate < now;
 
                       return (
-                        <tr key={patient._id} className="hover:bg-gray-50 transition-colors">
+                        <tr
+                          key={patient._id}
+                          className={`hover:bg-gray-50 transition-colors ${
+                            selectedPatients.includes(patient._id)
+                              ? "bg-blue-50"
+                              : ""
+                          }`}
+                        >
                           <td className="px-4 py-3">
                             <input
                               type="checkbox"
                               checked={selectedPatients.includes(patient._id)}
-                              onChange={() => togglePatientSelection(patient._id)}
+                              onChange={() =>
+                                togglePatientSelection(patient._id)
+                              }
                               className="rounded border-gray-300 text-blue-600"
                             />
                           </td>
                           <td className="px-4 py-3">
-                            <p className="font-medium text-gray-900">{patient.nomComplet}</p>
+                            <p className="font-medium text-gray-900">
+                              {patient.nomComplet}
+                            </p>
                           </td>
                           <td className="px-4 py-3 hidden sm:table-cell">
                             <div className="flex items-center gap-1">
                               <Phone className="w-4 h-4 text-gray-400" />
-                              <span className="text-gray-600">{patient.telephone}</span>
+                              <span className="text-gray-600">
+                                {patient.telephone}
+                              </span>
                             </div>
                           </td>
                           <td className="px-4 py-3">
                             <div>
-                              <p className="font-medium text-gray-900">{formatTime(patient.heureRendezVous)}</p>
+                              <p className="font-medium text-gray-900">
+                                {formatTime(patient.heureRendezVous)}
+                              </p>
                               <p className="text-xs text-gray-500">
                                 {appointmentDate.toLocaleDateString("fr-FR", {
                                   day: "2-digit",
                                   month: "2-digit",
                                 })}
                                 {isToday && (
-                                  <span className="ml-1 text-blue-600 font-medium">(Auj.)</span>
+                                  <span className="ml-1 text-blue-600 font-medium">
+                                    (Auj.)
+                                  </span>
                                 )}
                               </p>
                             </div>
                           </td>
                           <td className="px-4 py-3">
-                            <span className={`px-2 py-1 text-xs font-semibold rounded-full border ${getStatusColor(patient.statut)}`}>
+                            <span
+                              className={`px-2 py-1 text-xs font-semibold rounded-full border ${getStatusColor(
+                                patient.statut
+                              )}`}
+                            >
                               {patient.statut.replace("_", " ")}
                             </span>
                           </td>
                           <td className="px-4 py-3 hidden sm:table-cell">
                             {patient.smsEnvoye ? (
                               <div className="flex items-center gap-1">
-                                <CheckCircle className="w-4 h-4 text-green-600" />
-                                <span className="text-xs text-gray-500">Envoyé</span>
+                                <CheckCircle className="w-5 h-5 text-green-600" />
+                                <span className="text-xs text-gray-500">
+                                  Envoyé
+                                </span>
                               </div>
                             ) : (
                               <div className="flex items-center gap-1">
-                                <AlertCircle className="w-4 h-4 text-gray-400" />
-                                <span className="text-xs text-gray-500">Non</span>
+                                <AlertCircle className="w-5 h-5 text-gray-400" />
+                                <span className="text-xs text-gray-500">
+                                  En attente
+                                </span>
                               </div>
                             )}
                           </td>
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-2">
                               <button
-                                onClick={() => handleChangePatientStatus(patient._id, patient.statut)}
+                                onClick={() =>
+                                  handleChangePatientStatus(
+                                    patient._id,
+                                    patient.statut
+                                  )
+                                }
                                 className="px-2 py-1 text-xs font-medium bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
                               >
                                 {patient.statut === "en_attente"
@@ -1008,6 +1242,15 @@ export default function DashboardPage() {
                                   : patient.statut === "en_cours"
                                   ? "Fin"
                                   : "Reprendre"}
+                              </button>
+                              <button
+                                onClick={() =>
+                                  setShowPatientDetail(patient._id)
+                                }
+                                className="p-1 text-blue-600 hover:text-blue-800"
+                                title="Détails"
+                              >
+                                <Eye className="w-4 h-4" />
                               </button>
                               <button
                                 onClick={() => handleDeletePatient(patient._id)}
@@ -1028,7 +1271,9 @@ export default function DashboardPage() {
               {/* Pagination */}
               <div className="px-6 py-4 border-t border-gray-200 bg-gray-50 flex flex-col sm:flex-row items-center justify-between gap-4">
                 <div className="text-sm text-gray-700">
-                  {startIndex + 1} à {Math.min(endIndex, filteredPatients.length)} sur {filteredPatients.length}
+                  {startIndex + 1} à{" "}
+                  {Math.min(endIndex, filteredPatients.length)} sur{" "}
+                  {filteredPatients.length}
                 </div>
 
                 <div className="flex items-center gap-1">
@@ -1040,7 +1285,9 @@ export default function DashboardPage() {
                     <ChevronsLeft className="w-4 h-4" />
                   </button>
                   <button
-                    onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
+                    onClick={() =>
+                      setCurrentPage((prev) => Math.max(prev - 1, 1))
+                    }
                     disabled={currentPage === 1}
                     className="px-2 py-1 rounded border border-gray-300 disabled:opacity-50 hover:bg-gray-100"
                   >
@@ -1077,7 +1324,9 @@ export default function DashboardPage() {
                   </div>
 
                   <button
-                    onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
+                    onClick={() =>
+                      setCurrentPage((prev) => Math.min(prev + 1, totalPages))
+                    }
                     disabled={currentPage === totalPages}
                     className="px-2 py-1 rounded border border-gray-300 disabled:opacity-50 hover:bg-gray-100"
                   >
@@ -1096,6 +1345,150 @@ export default function DashboardPage() {
           )}
         </div>
       </main>
+
+      {/* Patient detail modal */}
+      {showPatientDetail && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="p-6">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-xl font-bold text-gray-900">
+                  Détails du Patient
+                </h3>
+                <button
+                  onClick={() => setShowPatientDetail(null)}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
+
+              {(() => {
+                const patient = patients.find(
+                  (p) => p._id === showPatientDetail
+                );
+                if (!patient) return null;
+
+                const appointmentDate = new Date(patient.heureRendezVous);
+                const now = new Date();
+                const isPast = appointmentDate < now;
+                const isToday =
+                  appointmentDate.toDateString() === now.toDateString();
+
+                return (
+                  <div className="space-y-6">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div>
+                        <h4 className="text-sm font-medium text-gray-500 mb-3">
+                          Infos Personnelles
+                        </h4>
+                        <div className="space-y-3">
+                          <div className="flex gap-3">
+                            <Users className="w-5 h-5 text-blue-600 flex-shrink-0" />
+                            <div>
+                              <p className="text-xs text-gray-500">Nom</p>
+                              <p className="font-medium text-gray-900">
+                                {patient.nomComplet}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="flex gap-3">
+                            <Phone className="w-5 h-5 text-blue-600 flex-shrink-0" />
+                            <div>
+                              <p className="text-xs text-gray-500">Téléphone</p>
+                              <p className="font-medium text-gray-900">
+                                {patient.telephone}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div>
+                        <h4 className="text-sm font-medium text-gray-500 mb-3">
+                          Rendez-vous
+                        </h4>
+                        <div className="space-y-3">
+                          <div className="flex gap-3">
+                            <CalendarDays className="w-5 h-5 text-blue-600 flex-shrink-0" />
+                            <div>
+                              <p className="text-xs text-gray-500">Heure RDV</p>
+                              <p className="font-medium text-gray-900">
+                                {formatDate(patient.heureRendezVous)}
+                              </p>
+                              {isToday && (
+                                <p className="text-xs text-blue-600 mt-1">
+                                  Aujourd'hui
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="border-t border-gray-200 pt-4">
+                      <h4 className="text-sm font-medium text-gray-500 mb-3">
+                        Statut
+                      </h4>
+                      <div className="flex flex-wrap gap-2">
+                        <span
+                          className={`px-3 py-1 text-xs font-semibold rounded-full border ${getStatusColor(
+                            patient.statut
+                          )}`}
+                        >
+                          {patient.statut.replace("_", " ")}
+                        </span>
+                        {patient.smsEnvoye && (
+                          <span className="px-3 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 border border-green-200 flex items-center gap-1">
+                            <CheckCircle className="w-3 h-3" />
+                            SMS Envoyé
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {patient.notes && (
+                      <div className="border-t border-gray-200 pt-4">
+                        <h4 className="text-sm font-medium text-gray-500 mb-2">
+                          Notes
+                        </h4>
+                        <p className="text-gray-700 bg-gray-50 p-3 rounded whitespace-pre-wrap text-sm">
+                          {patient.notes}
+                        </p>
+                      </div>
+                    )}
+
+                    <div className="border-t border-gray-200 pt-4 flex gap-2">
+                      <button
+                        onClick={() => {
+                          handleChangePatientStatus(
+                            patient._id,
+                            patient.statut
+                          );
+                          setShowPatientDetail(null);
+                        }}
+                        className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium"
+                      >
+                        Mettre à jour statut
+                      </button>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(patient.telephone);
+                          alert("Numéro copié");
+                        }}
+                        className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium"
+                      >
+                        Copier n°
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
