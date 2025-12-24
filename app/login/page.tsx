@@ -1,32 +1,63 @@
-'use client'
+"use client";
 
-import { useState } from 'react'
-import Link from 'next/link'
-import { useAuth } from '@/context/AuthContext'
-import { Eye, EyeOff, Mail, Lock, AlertCircle, Stethoscope } from 'lucide-react'
+import { useState } from "react";
+import Link from "next/link";
+import { useAuth } from "@/context/AuthContext";
+import {
+  Eye,
+  EyeOff,
+  Mail,
+  Lock,
+  AlertCircle,
+  Stethoscope,
+  User,
+  TestTube,
+  Shield,
+} from "lucide-react";
 
 export default function LoginPage() {
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [showPassword, setShowPassword] = useState(false)
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState('')
-  const { login } = useAuth()
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState("");
+  const { login, useTestAccount } = useAuth();
 
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setError('')
-    setIsLoading(true)
-    
+    e.preventDefault();
+    setError("");
+    setIsLoading(true);
+
     try {
-      await login(email, password)
+      await login(email, password);
     } catch (error: any) {
-      setError(error.message || 'Email ou mot de passe incorrect')
-      console.error('Login failed:', error)
+      setError(error.message || "Email ou mot de passe incorrect");
+      console.error("Login failed:", error);
     } finally {
-      setIsLoading(false)
+      setIsLoading(false);
     }
-  }
+  };
+
+  // Fonction pour utiliser les comptes de test
+  const handleTestLogin = (role: "doctor" | "admin") => {
+    setError("");
+    setIsLoading(true);
+
+    // Remplir les champs avec les identifiants de test
+    if (role === "doctor") {
+      setEmail("docteur.test@example.com");
+      setPassword("Test123!");
+    } else {
+      setEmail("admin.test@example.com");
+      setPassword("Admin123!");
+    }
+
+    // Utiliser la fonction de test du AuthContext
+    setTimeout(() => {
+      useTestAccount(role);
+      setIsLoading(false);
+    }, 500);
+  };
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 via-white to-cyan-50 py-12 px-4 sm:px-6 lg:px-8">
@@ -39,9 +70,35 @@ export default function LoginPage() {
           <h2 className="text-3xl font-bold text-gray-900 mb-2">
             Bon retour !
           </h2>
-          <p className="text-gray-600">
-            Connectez-vous à votre compte
-          </p>
+          <p className="text-gray-600">Connectez-vous à votre compte</p>
+        </div>
+
+        {/* Boutons de test rapide */}
+        <div className="mb-6">
+          <div className="bg-gradient-to-r from-blue-50 to-cyan-50 border border-blue-100 rounded-xl p-4 mb-4">
+            <div className="flex items-center gap-2 mb-2">
+              <TestTube className="w-5 h-5 text-blue-600" />
+              <p className="text-sm font-medium text-blue-700">Mode test</p>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => handleTestLogin("doctor")}
+                className="flex items-center justify-center gap-2 py-2 px-3 bg-white border border-blue-200 rounded-lg text-sm font-medium text-blue-600 hover:bg-blue-50 transition-colors shadow-sm"
+              >
+                <User className="w-4 h-4" />
+                Docteur Test
+              </button>
+              <button
+                type="button"
+                onClick={() => handleTestLogin("admin")}
+                className="flex items-center justify-center gap-2 py-2 px-3 bg-white border border-purple-200 rounded-lg text-sm font-medium text-purple-600 hover:bg-purple-50 transition-colors shadow-sm"
+              >
+                <Shield className="w-4 h-4" />
+                Admin Test
+              </button>
+            </div>
+          </div>
         </div>
 
         {/* Carte du formulaire */}
@@ -57,7 +114,10 @@ export default function LoginPage() {
 
             {/* Email */}
             <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-2">
+              <label
+                htmlFor="email"
+                className="block text-sm font-medium text-gray-700 mb-2"
+              >
                 Adresse email
               </label>
               <div className="relative">
@@ -80,7 +140,10 @@ export default function LoginPage() {
 
             {/* Mot de passe */}
             <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-2">
+              <label
+                htmlFor="password"
+                className="block text-sm font-medium text-gray-700 mb-2"
+              >
                 Mot de passe
               </label>
               <div className="relative">
@@ -90,7 +153,7 @@ export default function LoginPage() {
                 <input
                   id="password"
                   name="password"
-                  type={showPassword ? 'text' : 'password'}
+                  type={showPassword ? "text" : "password"}
                   autoComplete="current-password"
                   required
                   value={password}
@@ -114,8 +177,8 @@ export default function LoginPage() {
 
             {/* Mot de passe oublié */}
             <div className="flex items-center justify-end">
-              <Link 
-                href="/reset-password" 
+              <Link
+                href="/reset-password"
                 className="text-sm font-medium text-blue-600 hover:text-blue-700 transition-colors"
               >
                 Mot de passe oublié ?
@@ -130,34 +193,52 @@ export default function LoginPage() {
             >
               {isLoading ? (
                 <>
-                  <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  <svg
+                    className="animate-spin -ml-1 mr-3 h-5 w-5 text-white"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                  >
+                    <circle
+                      className="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                    ></circle>
+                    <path
+                      className="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                    ></path>
                   </svg>
                   Connexion en cours...
                 </>
               ) : (
-                'Se connecter'
+                "Se connecter"
               )}
             </button>
           </form>
-
           {/* Lien vers inscription */}
           <div className="mt-6 text-center">
             <p className="text-sm text-gray-600">
-              Vous n'avez pas de compte ?{' '}
-              <Link href="/register" className="font-semibold text-blue-600 hover:text-blue-700 transition-colors">
+              Vous n'avez pas de compte ?{" "}
+              <Link
+                href="/register"
+                className="font-semibold text-blue-600 hover:text-blue-700 transition-colors"
+              >
                 Créer un compte
               </Link>
             </p>
           </div>
         </div>
 
-        {/* Footer */}
-        <p className="mt-6 text-center text-xs text-gray-500">
-          Accès sécurisé à votre espace santé
-        </p>
+        {/* Footer avec info comptes test */}
+        <div className="mt-6 text-center">
+          <p className="text-xs text-gray-500 mb-2">© 2025 Créé par Anntel </p>
+        </div>
       </div>
     </div>
-  )
+  );
 }
